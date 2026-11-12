@@ -1,0 +1,2 @@
+# Chrono-Honeypot Cloud memakai HANYA Python standard library.
+# Sengaja tidak ada dependensi pihak ketiga: cold start cepat, tanpa risiko supply-chain.
