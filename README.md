@@ -55,47 +55,7 @@ Catatan penting: Vercel menjalankan fungsi pada path **tujuan** rewrite (`/api/i
 
 ---
 
-## 3. Upload ke GitHub
-
-> **Repo publik atau private?** Repo publik membuat penyerang bisa membaca signature dan nilai default Anda. Jika repo dibuat publik, **wajib** menimpa default lewat Environment Variables di Vercel (bukan di kode): `DECOY_ORG`, `HONEY_TOKEN_PREFIX`, dan `HONEYPOT_SECRET`. Dengan begitu umpan di server Anda tidak bisa dikenali dari kode sumber. Jangan pernah commit nilai asli ke repo (`.gitignore` sudah mengecualikan `.env`).
-
-**Opsi A — lewat browser (drag & drop)**
-
-1. Buka <https://github.com/new>, isi nama repo (mis. `chrono-honeypot-cloud`), pilih **Private**, klik **Create repository**.
-2. Ekstrak zip proyek ini. Di halaman repo klik **uploading an existing file**.
-3. Drag folder `api` **dan** file `vercel.json`, `requirements.txt`, `README.md`, `.gitignore` sekaligus ke halaman upload (struktur folder ikut terbawa).
-4. Klik **Commit changes**.
-
-**Opsi B — lewat Git**
-
-```bash
-cd chrono-honeypot-cloud
-git init -b main
-git add .
-git commit -m "feat: initial Chrono-Honeypot Cloud"
-git remote add origin https://github.com/<username>/chrono-honeypot-cloud.git
-git push -u origin main
-```
-
----
-
-## 4. Hubungkan ke Vercel
-
-1. Login ke <https://vercel.com> dengan akun GitHub → **Add New… → Project**.
-2. **Import** repo `chrono-honeypot-cloud` (beri izin akses repo jika diminta).
-3. Pengaturan proyek:
-   - **Framework Preset:** `Other`
-   - **Root Directory:** `./`
-   - **Build Command / Output Directory / Install Command:** biarkan kosong/default (tidak ada build).
-4. Buka bagian **Environment Variables** dan isi minimal `HONEYPOT_SECRET` (lihat bagian 5), lalu **Deploy**.
-5. Setelah selesai, cek **Settings → Deployment Protection**. Honeypot harus **bisa diakses publik**; jika kunjungan ke URL production meminta login Vercel (401), nonaktifkan proteksi untuk environment tersebut.
-6. **Jangan** mengaktifkan *Attack Challenge Mode* di Vercel Firewall untuk proyek ini — itu menantang bot dan justru menghalangi trafik yang ingin Anda jebak.
-
-Setiap `git push` ke `main` akan otomatis men-deploy ulang. **Perubahan Environment Variables baru berlaku setelah deploy ulang** (Deployments → ⋯ → Redeploy).
-
----
-
-## 5. Environment Variables
+## 3. Environment Variables
 
 | Variabel | Default | Fungsi |
 |---|---|---|
@@ -130,7 +90,7 @@ Pesan chat selalu mengirim `allowed_mentions: {"parse": []}` (tidak ada `@everyo
 
 ---
 
-## 6. Menguji dengan aman
+## 4. Menguji dengan aman
 
 **Aturan:** hanya uji ke deployment milik Anda sendiri atau `127.0.0.1`. Jangan arahkan sqlmap/nikto/dirb ke sistem pihak lain.
 
@@ -224,7 +184,7 @@ Header `Authorization` dan `Cookie` selalu disensor; field password disensor kec
 
 ---
 
-## 7. Operasional dan hardening
+## 5. Operasional dan hardening
 
 1. **Pisahkan proyek.** Gunakan proyek Vercel (dan idealnya akun/tim) khusus honeypot. Jangan simpan secret produksi apa pun di environment-nya selain webhook.
 2. **Biaya dan kuota.** Tarpit menahan fungsi tetap berjalan selama delay. Scanner agresif bisa membuat ribuan invokasi × beberapa detik. Pantau **Usage**; turunkan `TARPIT_MAX_SECONDS` atau set `TARPIT_ENABLED=false` bila perlu. Di Vercel Firewall, pasang aturan *rate limit* sesuai plan Anda agar satu IP tidak menghabiskan kuota.
@@ -236,7 +196,7 @@ Header `Authorization` dan `Cookie` selalu disensor; field password disensor kec
 
 ---
 
-## 8. Batasan (jujur)
+## 6. Batasan (jujur)
 
 - **Stateless.** "Profil" penyerang dihitung per request. Korelasi lintas request dilakukan lewat `fingerprint` di SIEM Anda, bukan di dalam fungsi.
 - **Persona tidak sempurna.** Edge Vercel menambahkan header sendiri (mis. `x-vercel-id`, dan dapat menimpa `Server`) yang tidak bisa dihapus. Penyerang mahir bisa mengenali Vercel; mutasi stack meyakinkan untuk scanner dan script, bukan jaminan terhadap APT.
@@ -247,7 +207,7 @@ Header `Authorization` dan `Cookie` selalu disensor; field password disensor kec
 
 ---
 
-## 9. Kustomisasi
+## 7. Kustomisasi
 
 | Ingin… | Ubah di `api/index.py` |
 |---|---|
