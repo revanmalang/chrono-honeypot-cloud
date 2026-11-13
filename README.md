@@ -12,7 +12,7 @@ Tool ini menyamar sebagai aplikasi web/API produksi yang rentan, lalu **memutasi
 
 ```
 Request liar (/.env, /wp-login.php, /api/v1/users, ?id=1' OR 1=1 ...)
-        │   vercel.json: rewrite "/(.*)" → /api/index
+        │   vercel.json: rewrite "/:path*" → /api/index?__chrono_path=<path asli>
         ▼
 ┌─────────────────────────── api/index.py (satu invokasi, stateless) ───────────────────────────┐
 │ 1. RequestContext     parse URL/header/JSON/form, decode berlapis, sidik jari (HMAC IP+UA)    │
@@ -31,7 +31,7 @@ Semua data umpan dibuat dari **RNG deterministik**: `HMAC(HONEYPOT_SECRET, finge
 
 - **Fingerprint** = HMAC dari `IP + User-Agent` → penyerang yang sama selalu melihat persona dan data umpan yang sama (tampak konsisten).
 - **Epoch** = `waktu / MUTATION_WINDOW_SECONDS` (default 1 jam) → setiap jendela waktu, *stack* palsu bermutasi (mis. dari Apache/PHP menjadi Express/PostgreSQL). Ini mempersulit fingerprinting jangka panjang. Set `0` untuk persona tetap.
-- **Honey-token bertanda tangan**: API key umpan berformat `nlr_live_<fp8><acak><sig>`. Jika token itu muncul lagi di request berikutnya, engine memverifikasi tanda tangannya dan mencatat `honey_token_reuse` (severity **critical**) beserta fingerprint yang memanennya — tanpa menyimpan apa pun.
+- **Honey-token bertanda tangan**: API key umpan berformat `<prefix><fp8><acak><sig>` (prefix default `nlr_live_`, ubah lewat `HONEY_TOKEN_PREFIX`). Jika token itu muncul lagi di request berikutnya, engine memverifikasi tanda tangannya dan mencatat `honey_token_reuse` (severity **critical**) beserta fingerprint yang memanennya — tanpa menyimpan apa pun.
 
 ---
 
@@ -41,17 +41,61 @@ Semua data umpan dibuat dari **RNG deterministik**: `HMAC(HONEYPOT_SECRET, finge
 chrono-honeypot-cloud/
 ├── api/
 │   └── index.py        # seluruh engine (handler Vercel: class `handler`)
+├── tests/
+│   └── test_honeypot.py # 70 pemeriksaan integrasi (lokal, tanpa internet)
 ├── vercel.json         # rewrite semua path ke engine + maxDuration
 ├── requirements.txt    # kosong (hanya komentar) — tanpa dependensi
 ├── .gitignore
 └── README.md
 ```
 
-`vercel.json` memakai satu aturan `rewrites` `"/(.*)" → "/api/index"`. Jadi **semua** path (`/admin`, `/.env`, `/wp-login.php`, `/api/v1/users`, path acak apa pun) masuk ke engine, bukan hanya daftar tetap.
+`vercel.json` memakai satu aturan `rewrites`: `"/:path*" → "/api/index?__chrono_path=:path*"`. Jadi **semua** path (`/admin`, `/.env`, `/wp-login.php`, `/api/v1/users`, path acak apa pun) masuk ke engine, bukan hanya daftar tetap.
+
+Catatan penting: Vercel menjalankan fungsi pada path **tujuan** rewrite (`/api/index`), bukan path yang diminta pengunjung. Karena itu path asli dikirim lewat parameter query `__chrono_path`; engine memulihkannya, menghapus parameter itu, dan mempertahankan query string asli. Tanpa langkah ini setiap request akan tampak sebagai `/api/index`.
 
 ---
 
-## 3. Environment Variables
+## 3. Upload ke GitHub
+
+> **Repo publik atau private?** Repo publik membuat penyerang bisa membaca signature dan nilai default Anda. Jika repo dibuat publik, **wajib** menimpa default lewat Environment Variables di Vercel (bukan di kode): `DECOY_ORG`, `HONEY_TOKEN_PREFIX`, dan `HONEYPOT_SECRET`. Dengan begitu umpan di server Anda tidak bisa dikenali dari kode sumber. Jangan pernah commit nilai asli ke repo (`.gitignore` sudah mengecualikan `.env`).
+
+**Opsi A — lewat browser (drag & drop)**
+
+1. Buka <https://github.com/new>, isi nama repo (mis. `chrono-honeypot-cloud`), pilih **Private**, klik **Create repository**.
+2. Ekstrak zip proyek ini. Di halaman repo klik **uploading an existing file**.
+3. Drag folder `api` **dan** file `vercel.json`, `requirements.txt`, `README.md`, `.gitignore` sekaligus ke halaman upload (struktur folder ikut terbawa).
+4. Klik **Commit changes**.
+
+**Opsi B — lewat Git**
+
+```bash
+cd chrono-honeypot-cloud
+git init -b main
+git add .
+git commit -m "feat: initial Chrono-Honeypot Cloud"
+git remote add origin https://github.com/<username>/chrono-honeypot-cloud.git
+git push -u origin main
+```
+
+---
+
+## 4. Hubungkan ke Vercel
+
+1. Login ke <https://vercel.com> dengan akun GitHub → **Add New… → Project**.
+2. **Import** repo `chrono-honeypot-cloud` (beri izin akses repo jika diminta).
+3. Pengaturan proyek:
+   - **Framework Preset:** `Other`
+   - **Root Directory:** `./`
+   - **Build Command / Output Directory / Install Command:** biarkan kosong/default (tidak ada build).
+4. Buka bagian **Environment Variables** dan isi minimal `HONEYPOT_SECRET` (lihat bagian 5), lalu **Deploy**.
+5. Setelah selesai, cek **Settings → Deployment Protection**. Honeypot harus **bisa diakses publik**; jika kunjungan ke URL production meminta login Vercel (401), nonaktifkan proteksi untuk environment tersebut.
+6. **Jangan** mengaktifkan *Attack Challenge Mode* di Vercel Firewall untuk proyek ini — itu menantang bot dan justru menghalangi trafik yang ingin Anda jebak.
+
+Setiap `git push` ke `main` akan otomatis men-deploy ulang. **Perubahan Environment Variables baru berlaku setelah deploy ulang** (Deployments → ⋯ → Redeploy).
+
+---
+
+## 5. Environment Variables
 
 | Variabel | Default | Fungsi |
 |---|---|---|
@@ -70,6 +114,7 @@ chrono-honeypot-cloud/
 | `WEBHOOK_TIMEOUT_SECONDS` | `2.0` | Timeout pengiriman webhook (webhook dikirim paralel dengan tarpit). |
 | `MUTATION_WINDOW_SECONDS` | `3600` | Lama satu epoch mutasi persona. `0` = persona tetap. |
 | `DECOY_ORG` | `Aurora Logistics` | Nama perusahaan fiktif di halaman/data umpan. **Jangan pakai merek asli.** |
+| `HONEY_TOKEN_PREFIX` | `nlr_live_` | Prefix API key umpan (huruf kecil/angka/`_`, 3–16 karakter). **Ubah** jika repo publik. Mengganti nilainya membuat token lama tidak terverifikasi lagi. |
 | `LOG_CLEARTEXT_CREDENTIALS` | `false` | Default: password yang dicoba **tidak** dicatat (hanya panjang + 12 hex pertama SHA-256). Kredensial credential-stuffing sering milik korban asli, jadi biarkan `false` kecuali ada alasan kuat. |
 | `CANARY_AWS_ACCESS_KEY_ID` / `CANARY_AWS_SECRET_ACCESS_KEY` | – | Pasangan AWS canary dari <https://canarytokens.org> (jenis *AWS keys*). Jika diisi, dipakai di `.env`, `/proc/self/environ`, metadata SSRF, dll. Saat penyerang mencoba memakainya, Anda diberi tahu **di luar** honeypot. |
 | `SENSOR_ID` | `chrono-<env>-<region>` | Label sensor di log. |
@@ -85,7 +130,7 @@ Pesan chat selalu mengirim `allowed_mentions: {"parse": []}` (tidak ada `@everyo
 
 ---
 
-## 4. Menguji dengan aman
+## 6. Menguji dengan aman
 
 **Aturan:** hanya uji ke deployment milik Anda sendiri atau `127.0.0.1`. Jangan arahkan sqlmap/nikto/dirb ke sistem pihak lain.
 
@@ -104,6 +149,14 @@ $env:HONEYPOT_SECRET="ganti-dengan-secret-acak-panjang"
 $env:TARPIT_MAX_SECONDS="0.5"
 python api/index.py
 ```
+
+### Tes otomatis
+
+```bash
+python tests/test_honeypot.py   # menjalankan engine di 127.0.0.1 + penerima webhook tiruan, tanpa internet
+```
+
+Mencakup deteksi serangan, mutasi respons, tarpit dan batas waktu, sensor kredensial, webhook, serta simulasi rewrite Vercel. Keluaran akhir yang diharapkan: `ALL OK`.
 
 ### B. Skenario uji (ganti `BASE`; di Windows pakai Git Bash/WSL atau `curl.exe`)
 
@@ -133,6 +186,8 @@ Uji **honey-token reuse**: ambil nilai `INTERNAL_API_TOKEN` dari `/.env`, lalu k
 ### C. Smoke test pertama setelah deploy ke Vercel
 
 Buka `https://nama-proyek.vercel.app/wp-login.php`. Jika Anda melihat halaman login WordPress palsu, rewrite dan handler bekerja. Lalu cek log (lihat bawah). Jika Anda melihat halaman 404 Vercel/“NOT_FOUND”, periksa bahwa `vercel.json` ada di root repo dan folder `api/` terunggah.
+
+**Jika muncul 404 gaya Apache/nginx bertuliskan `The requested URL /api/index was not found`:** fungsi sudah berjalan, tetapi `vercel.json` Anda masih versi lama (tanpa `?__chrono_path=:path*` di `destination`). Ganti dengan versi terbaru, commit, lalu tunggu deploy ulang selesai. Jika log menampilkan peringatan `rewrite_path_unresolved`, rewrite tidak meneruskan path asli; periksa isi `vercel.json` dan hasil deploy.
 
 ### D. Melihat log
 
@@ -169,7 +224,7 @@ Header `Authorization` dan `Cookie` selalu disensor; field password disensor kec
 
 ---
 
-## 5. Operasional dan hardening
+## 7. Operasional dan hardening
 
 1. **Pisahkan proyek.** Gunakan proyek Vercel (dan idealnya akun/tim) khusus honeypot. Jangan simpan secret produksi apa pun di environment-nya selain webhook.
 2. **Biaya dan kuota.** Tarpit menahan fungsi tetap berjalan selama delay. Scanner agresif bisa membuat ribuan invokasi × beberapa detik. Pantau **Usage**; turunkan `TARPIT_MAX_SECONDS` atau set `TARPIT_ENABLED=false` bila perlu. Di Vercel Firewall, pasang aturan *rate limit* sesuai plan Anda agar satu IP tidak menghabiskan kuota.
@@ -192,7 +247,7 @@ Header `Authorization` dan `Cookie` selalu disensor; field password disensor kec
 
 ---
 
-## 6. Kustomisasi
+## 9. Kustomisasi
 
 | Ingin… | Ubah di `api/index.py` |
 |---|---|
