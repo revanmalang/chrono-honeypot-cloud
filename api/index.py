@@ -16,6 +16,7 @@ variables (see README.md).
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import html
@@ -87,6 +88,14 @@ def _env_severity(name: str, default: str) -> str:
     return value if value in SEVERITY_ORDER else default
 
 
+def _env_prefix(name: str, default: str) -> str:
+    value = _env_str(name, default)
+    if re.fullmatch(r"[a-z0-9_]{3,16}", value):
+        return value
+    _log("warning", "ignored_invalid_token_prefix", env=name)
+    return default
+
+
 def _env_url(name: str) -> str:
     value = _env_str(name)
     if value and not value.lower().startswith(("https://", "http://")):
@@ -121,6 +130,7 @@ class Config:
     canary_key_id: str
     canary_secret: str
     max_body: int
+    token_prefix: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -152,6 +162,7 @@ class Config:
             canary_key_id=_env_str("CANARY_AWS_ACCESS_KEY_ID"),
             canary_secret=_env_str("CANARY_AWS_SECRET_ACCESS_KEY"),
             max_body=int(_env_num("MAX_BODY_BYTES", 65536, 1024, 1048576)),
+            token_prefix=_env_prefix("HONEY_TOKEN_PREFIX", "nlr_live_"),
         )
 
 
@@ -342,8 +353,34 @@ def _client_ip(headers: dict[str, str], fallback: str) -> str:
     return fallback
 
 
+PATH_PARAM = "__chrono_path"
+_PATH_PARAM_RE = re.compile(r"(?:^|&)" + PATH_PARAM + r"=([^&]*)")
+_UNSUBSTITUTED = {":path*", "$path", "$1"}
+
+
+def recover_original_target(raw_target: str) -> str:
+    """Rebuild the attacker's original request target.
+
+    On Vercel the rewrite in vercel.json runs the function at its *destination*
+    (`/api/index?__chrono_path=<original path>&<original query>`), so the real
+    path travels in a query parameter that we strip here. Without the parameter
+    (local runs) the target is used as-is.
+    """
+    path_part, _, query_part = raw_target.partition("?")
+    match = _PATH_PARAM_RE.search(query_part)
+    if match:
+        original = unquote(match.group(1))
+        if original not in _UNSUBSTITUTED:
+            remaining = _PATH_PARAM_RE.sub("", query_part).lstrip("&")
+            return "/" + original.lstrip("/") + ("?" + remaining if remaining else "")
+    if path_part.rstrip("/") == "/api/index":
+        _log("warning", "rewrite_path_unresolved", hint="check vercel.json rewrite; treating request as '/'")
+        return "/" + ("?" + query_part if query_part and not match else "")
+    return raw_target
+
+
 def build_context(req: BaseHTTPRequestHandler, cfg: Config, started: float) -> RequestContext:
-    raw_target = req.path[:4096]
+    raw_target = recover_original_target(req.path[:4096])
     path_part, _, query_part = raw_target.partition("?")
     query_part = query_part.split("#", 1)[0]
     headers = {k.lower(): v[:2048] for k, v in req.headers.items()}
@@ -470,7 +507,6 @@ GENERIC_CLIENT_RE = re.compile(
     re.IGNORECASE,
 )
 IDOR_RE = re.compile(r"^/api/(?:v\d+/)?(?:users?|accounts?|orders?|invoices?|customers?|profiles?)/(\d+)/?$", re.IGNORECASE)
-HONEY_TOKEN_RE = re.compile(r"nlr_live_([0-9a-f]{8})([a-z0-9]{16})([0-9a-f]{6})")
 MASS_ASSIGNMENT_KEYS = {
     "isadmin", "is_admin", "admin", "role", "roles", "is_superuser", "isstaff", "is_staff",
     "permissions", "privileges", "verified", "balance",
@@ -515,9 +551,14 @@ def sign_honey_token(secret: str, body: str) -> str:
     return hmac.new(secret.encode(), f"tok:{body}".encode(), hashlib.sha256).hexdigest()[:6]
 
 
-def find_honey_token(text: str, secret: str) -> Optional[str]:
+@functools.lru_cache(maxsize=8)
+def _honey_token_re(prefix: str) -> "re.Pattern[str]":
+    return re.compile(re.escape(prefix) + r"([0-9a-f]{8})([a-z0-9]{16})([0-9a-f]{6})")
+
+
+def find_honey_token(text: str, secret: str, prefix: str = "nlr_live_") -> Optional[str]:
     """Return the harvesting fingerprint prefix if `text` holds a valid honey-token."""
-    for match in HONEY_TOKEN_RE.finditer(text):
+    for match in _honey_token_re(prefix).finditer(text):
         body = match.group(1) + match.group(2)
         if hmac.compare_digest(sign_honey_token(secret, body), match.group(3)):
             return match.group(1)
@@ -539,7 +580,7 @@ class BehavioralProfiler:
 
         evasion = self._evasion(ctx, ordered)
         skill, confidence, scores = self._assess_skill(ctx, ordered, evasion)
-        severity = max((f.severity for f in ordered), default="info")
+        severity = ordered[0].severity if ordered else "info"  # `ordered` is sorted by severity rank
         if skill is SkillLevel.APT and severity in {"medium", "high"}:
             severity = _SEVERITY_NAMES[SEVERITY_ORDER[severity] + 1]
 
@@ -598,7 +639,7 @@ class BehavioralProfiler:
         if ctx.method not in {"GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"}:
             out.append(Finding(Intent.RECONNAISSANCE, "http_method_probe", "low", ("T1595.002",), ctx.method))
 
-        origin = find_honey_token(ctx.full_surface, self.cfg.secret)
+        origin = find_honey_token(ctx.full_surface, self.cfg.secret, self.cfg.token_prefix)
         if origin:
             out.append(Finding(Intent.API_EXPLOITATION, "honey_token_reuse", "critical", ("T1078", "T1552.001"),
                                f"token harvested by fingerprint prefix {origin}", advanced=True))
@@ -759,7 +800,7 @@ class HoneyFactory:
 
     def api_key(self, rng: random.Random) -> str:
         body = self.trace + self.chars(rng, 16, "abcdefghijklmnopqrstuvwxyz0123456789")
-        return f"nlr_live_{body}{sign_honey_token(self.cfg.secret, body)}"
+        return f"{self.cfg.token_prefix}{body}{sign_honey_token(self.cfg.secret, body)}"
 
     def users(self, count: int = 8, start_id: int = 1) -> list[dict[str, Any]]:
         rng = self.rng("users")
@@ -795,7 +836,7 @@ def db_error(db: str, fragment: str) -> tuple[str, str, str]:
 
 _PAGE_CSS = ("body{font-family:system-ui,Segoe UI,Arial,sans-serif;background:#f1f1f1;color:#1d2327;margin:0}"
              "main{max-width:420px;margin:8vh auto;background:#fff;padding:24px;border:1px solid #c3c4c7}"
-             "main.wide{max-width:860px}label{display:block;margin:12px 0}input{width:100%;padding:8px;box-sizing:border-box}"
+             "main.wide{max-width:1100px}label{display:block;margin:12px 0}input{width:100%;padding:8px;box-sizing:border-box}"
              "button{padding:8px 16px;background:#2271b1;color:#fff;border:0}table{border-collapse:collapse;width:100%}"
              "td,th{border:1px solid #ddd;padding:6px;font-size:13px;text-align:left}")
 
@@ -862,7 +903,7 @@ class DeceptionEngine:
             return "<p>No records found.</p>"
         head = "".join(f"<th>{html.escape(str(k))}</th>" for k in rows[0])
         body = "".join("<tr>" + "".join(f"<td>{html.escape(str(v))}</td>" for v in row.values()) + "</tr>" for row in rows)
-        return f"<table><tr>{head}</tr>{body}</table>"
+        return f'<div style="overflow-x:auto"><table><tr>{head}</tr>{body}</table></div>'
 
     # -- SQL injection ---------------------------------------------------------
     def _sqli(self, ctx: RequestContext, profile: Profile, persona: Persona, honey: HoneyFactory) -> DecoyResponse:
